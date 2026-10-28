@@ -1,0 +1,147 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Home</title>
+    <link rel="icon" type="image/ico" href="https://hcpss.instructure.com/favicon.ico">
+    <!-- Load libcurl.js full bundle with WASM embedded -->
+    <script src="https://cdn.jsdelivr.net/npm/libcurl.js@latest/libcurl_full.js" defer></script>
+    <style>
+        body, html {
+            margin: 0; padding: 0; width: 100%; height: 100%;
+            font-family: system-ui, -apple-system, sans-serif;
+            display: flex; flex-direction: column; overflow: hidden;
+            background-color: #1a1a1a; color: #fff;
+        }
+        #nav-bar {
+            display: flex; gap: 10px; padding: 10px;
+            background: #2b2b2b; box-shadow: 0 2px 5px rgba(0,0,0,0.3);
+        }
+        #url-input {
+            flex-grow: 1; padding: 8px 12px; border-radius: 4px;
+            border: 1px solid #444; background: #333; color: #fff; font-size: 14px;
+        }
+        #go-btn {
+            padding: 8px 16px; border: none; border-radius: 4px;
+            background: #007acc; color: white; cursor: pointer; font-weight: bold;
+        }
+        #go-btn:hover { background: #0098ff; }
+        #frame-container { flex-grow: 1; position: relative; background: #fff; }
+        iframe { width: 100%; height: 100%; border: none; background: #fff; }
+    </style>
+</head>
+<body>
+
+    <div id="nav-bar">
+        <input type="text" id="url-input" placeholder="Enter URL (e.g., https://example.com)">
+        <button id="go-btn">Go</button>
+    </div>
+
+    <div id="frame-container">
+        <iframe id="sandbox-frame" sandbox="allow-scripts allow-same-origin allow-forms"></iframe>
+    </div>
+
+    <script>
+        const defaultWispServer = "wss://wisp.mercurywork.shop/"; // Public Mercury Workshop instance
+        const iframe = document.getElementById('sandbox-frame');
+        const urlInput = document.getElementById('url-input');
+        const goBtn = document.getElementById('go-btn');
+
+        let currentUrl = "";
+
+        // Wait for libcurl to initialize
+        window.addEventListener('load', () => {
+            if (typeof libcurl !== 'undefined') {
+                libcurl.set_websocket(defaultWispServer);
+                console.log("libcurl.js successfully connected to Wisp server:", defaultWispServer);
+            } else {
+                console.error("Failed to load libcurl.js from CDN.");
+            }
+        });
+
+        // Trigger navigation on button click or Enter key
+        goBtn.addEventListener('click', () => navigateTo(urlInput.value));
+        urlInput.addEventListener('keypress', (e) => {
+            if (e.key === 'Enter') navigateTo(urlInput.value);
+        });
+
+        // Main navigation logic
+        async function navigateTo(targetUrl) {
+            if (!targetUrl.startsWith('http://') && !targetUrl.startsWith('https://')) {
+                targetUrl = 'https://' + targetUrl;
+            }
+            currentUrl = targetUrl;
+            urlInput.value = targetUrl;
+
+            try {
+                // Fetch the raw page via libcurl.js multiplexed over Wisp
+                const response = await libcurl.fetch(targetUrl);
+                let htmlContent = await response.text();
+
+                // Inject client script to intercept links and anchor changes inside the iframe
+                const injectionScript = `
+                    <script>
+                        (function() {
+                            const baseUrl = "${targetUrl}";
+
+                            // Helper to resolve relative paths against the current loaded page URL
+                            function resolveUrl(relative) {
+                                try { return new URL(relative, baseUrl).href; } 
+                                catch(e) { return relative; }
+                            }
+
+                            // Intercept all link clicks inside the iframe
+                            document.addEventListener('click', function(e) {
+                                const anchor = e.target.closest('a');
+                                if (anchor && anchor.getAttribute('href')) {
+                                    e.preventDefault();
+                                    const absoluteUrl = resolveUrl(anchor.getAttribute('href'));
+                                    // Send destination back to top window
+                                    window.parent.postMessage({ type: 'NAVIGATE', url: absoluteUrl }, '*');
+                                }
+                            }, true);
+
+                            // Intercept form submissions
+                            document.addEventListener('submit', function(e) {
+                                const form = e.target;
+                                if (form.action && form.method.toLowerCase() === 'get') {
+                                    e.preventDefault();
+                                    const formData = new URLSearchParams(new FormData(form)).toString();
+                                    const absoluteUrl = resolveUrl(form.getAttribute('action')) + '?' + formData;
+                                    window.parent.postMessage({ type: 'NAVIGATE', url: absoluteUrl }, '*');
+                                }
+                            }, true);
+                        })();
+                    <\/script>
+                `;
+
+                // Combine the injection runtime right before the closing head or body
+                if (htmlContent.includes('</head>')) {
+                    htmlContent = htmlContent.replace('</head>', injectionScript + '</head>');
+                } else {
+                    htmlContent = injectionScript + htmlContent;
+                }
+
+                // Write the code into the iframe securely using blobs to ensure scripts execute natively
+                const blob = new Blob([htmlContent], { type: 'text/html' });
+                iframe.src = URL.createObjectURL(blob);
+
+            } catch (error) {
+                console.error("Navigation error:", error);
+                iframe.srcdoc = `<div style="color:red; padding:20px; font-family:sans-serif;">
+                                    <h3>Failed to load page via Wisp</h3>
+                                    <p>${error.message}</p>
+                                 </div>`;
+            }
+        }
+
+        // Listen for messaging back from the injected iframe script
+        window.addEventListener('message', (event) => {
+            if (event.data && event.data.type === 'NAVIGATE') {
+                navigateTo(event.data.url);
+            }
+        });
+    </script>
+</body>
+</html>
