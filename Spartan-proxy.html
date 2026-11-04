@@ -42,15 +42,14 @@
         <iframe id="sandbox-frame" sandbox="allow-scripts allow-same-origin allow-forms"></iframe>
     </div>
 
-    <script>
-        const defaultWispServer = "wss://wisp.mercurywork.shop/"; // Public Mercury Workshop instance, There are other ones
+<script>
+        const defaultWispServer = "wss://wisp.mercurywork.shop/";
         const iframe = document.getElementById('sandbox-frame');
         const urlInput = document.getElementById('url-input');
         const goBtn = document.getElementById('go-btn');
 
         let currentUrl = "";
 
-        // Wait for libcurl to initialize
         window.addEventListener('load', () => {
             if (typeof libcurl !== 'undefined') {
                 libcurl.set_websocket(defaultWispServer);
@@ -60,13 +59,11 @@
             }
         });
 
-        // Trigger navigation on button click or Enter key
         goBtn.addEventListener('click', () => navigateTo(urlInput.value));
         urlInput.addEventListener('keypress', (e) => {
             if (e.key === 'Enter') navigateTo(urlInput.value);
         });
 
-        // Main navigation logic
         async function navigateTo(targetUrl) {
             if (!targetUrl.startsWith('http://') && !targetUrl.startsWith('https://')) {
                 targetUrl = 'https://' + targetUrl;
@@ -75,29 +72,33 @@
             urlInput.value = targetUrl;
 
             try {
-                // Fetch the raw page via libcurl.js multiplexed over Wisp
                 const response = await libcurl.fetch(targetUrl);
                 let htmlContent = await response.text();
 
-                // Inject client script to intercept links and anchor changes inside the iframe
+                // 1. Determine base URL origin for relative path resolution
+                const parsedUrl = new URL(targetUrl);
+                const baseUrlOrigin = parsedUrl.origin;
+
+                // 2. Injection script to handle base URI, links, and form navigation
                 const injectionScript = `
+                    <base href="${targetUrl}">
                     <script>
                         (function() {
                             const baseUrl = "${targetUrl}";
 
-                            // Helper to resolve relative paths against the current loaded page URL
                             function resolveUrl(relative) {
                                 try { return new URL(relative, baseUrl).href; } 
                                 catch(e) { return relative; }
                             }
 
-                            // Intercept all link clicks inside the iframe
+                            // Intercept link clicks
                             document.addEventListener('click', function(e) {
                                 const anchor = e.target.closest('a');
                                 if (anchor && anchor.getAttribute('href')) {
+                                    const href = anchor.getAttribute('href');
+                                    if (href.startsWith('#')) return; // Allow internal page anchors
                                     e.preventDefault();
-                                    const absoluteUrl = resolveUrl(anchor.getAttribute('href'));
-                                    // Send destination back to top window
+                                    const absoluteUrl = resolveUrl(href);
                                     window.parent.postMessage({ type: 'NAVIGATE', url: absoluteUrl }, '*');
                                 }
                             }, true);
@@ -105,10 +106,13 @@
                             // Intercept form submissions
                             document.addEventListener('submit', function(e) {
                                 const form = e.target;
-                                if (form.action && form.method.toLowerCase() === 'get') {
+                                if (form.action) {
                                     e.preventDefault();
                                     const formData = new URLSearchParams(new FormData(form)).toString();
-                                    const absoluteUrl = resolveUrl(form.getAttribute('action')) + '?' + formData;
+                                    const actionUrl = resolveUrl(form.getAttribute('action'));
+                                    const absoluteUrl = form.method.toLowerCase() === 'get' 
+                                        ? actionUrl + '?' + formData 
+                                        : actionUrl;
                                     window.parent.postMessage({ type: 'NAVIGATE', url: absoluteUrl }, '*');
                                 }
                             }, true);
@@ -116,14 +120,15 @@
                     <\/script>
                 `;
 
-                // Combine the injection runtime right before the closing head or body
-                if (htmlContent.includes('</head>')) {
+                // Insert right after <head> or at the top of the HTML
+                if (htmlContent.includes('<head>')) {
+                    htmlContent = htmlContent.replace('<head>', '<head>' + injectionScript);
+                } else if (htmlContent.includes('</head>')) {
                     htmlContent = htmlContent.replace('</head>', injectionScript + '</head>');
                 } else {
                     htmlContent = injectionScript + htmlContent;
                 }
 
-                // Write the code into the iframe securely using blobs to ensure scripts execute natively
                 const blob = new Blob([htmlContent], { type: 'text/html' });
                 iframe.src = URL.createObjectURL(blob);
 
@@ -136,7 +141,6 @@
             }
         }
 
-        // Listen for messaging back from the injected iframe script
         window.addEventListener('message', (event) => {
             if (event.data && event.data.type === 'NAVIGATE') {
                 navigateTo(event.data.url);
